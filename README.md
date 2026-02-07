@@ -1,1 +1,1 @@
-# Team-D-Receipt-and-Invoice-Digitizer
+# Team-D Receipt and Invoice Digitizer
