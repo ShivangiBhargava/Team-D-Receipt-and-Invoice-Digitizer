@@ -1,4 +1,4 @@
-
+%%writefile app.py
 import streamlit as st
 import pandas as pd
 import sqlite3
@@ -9,10 +9,11 @@ from datetime import datetime
 import json
 from groq import Groq
 import io
+from pdf2image import convert_from_bytes # Import pdf2image
 
 # --- CONFIGURATION ---
 DB_NAME = 'receipt_vault_v6.db'
-GROQ_MODEL = "llama-3.3-70b-versatile" 
+GROQ_MODEL = "llama-3.3-70b-versatile"
 
 # --- DATABASE FUNCTIONS ---
 def init_db():
@@ -30,14 +31,14 @@ def init_db():
                     upload_timestamp TEXT,
                     category TEXT DEFAULT 'Uncategorized'
                 )''')
-    
+
     # Add category column if it doesn't exist (for backward compatibility)
     try:
         c.execute("ALTER TABLE receipts ADD COLUMN category TEXT DEFAULT 'Uncategorized'")
         conn.commit()
     except sqlite3.OperationalError:
         pass  # Column already exists
-    
+
     c.execute('''CREATE TABLE IF NOT EXISTS line_items (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     receipt_id INTEGER,
@@ -60,32 +61,32 @@ def check_if_receipt_exists(merchant, date, total, invoice_num):
     c.execute("SELECT id, merchant, total_amount, invoice_number FROM receipts WHERE date = ?", (date,))
     candidates = c.fetchall()
     conn.close()
-    
+
     for row in candidates:
         db_id, db_merch, db_total, db_inv = row
         if invoice_num and invoice_num != "Unknown" and db_inv and db_inv != "Unknown":
             if invoice_num == db_inv:
-                return True, 1, db_id 
-        
+                return True, 1, db_id
+
         price_match = abs(db_total - total) <= 0.05
         m1 = merchant.lower().strip()
         m2 = db_merch.lower().strip()
         merchant_match = (m1 in m2 or m2 in m1)
-        
+
         if price_match and merchant_match:
             return True, 1, db_id
-            
+
     return False, 0, None
 
 def save_receipt_to_db(data, filename, line_items_data):
     conn = sqlite3.connect(DB_NAME)
     c = conn.cursor()
     upload_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    c.execute("""INSERT INTO receipts 
-                 (merchant, date, invoice_number, subtotal, tax, total_amount, filename, upload_timestamp, category) 
+    c.execute("""INSERT INTO receipts
+                 (merchant, date, invoice_number, subtotal, tax, total_amount, filename, upload_timestamp, category)
                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-              (data['merchant'], data['date'], data['invoice_number'], 
-               data['subtotal'], data['tax'], data['total'], filename, upload_time, 
+              (data['merchant'], data['date'], data['invoice_number'],
+               data['subtotal'], data['tax'], data['total'], filename, upload_time,
                data.get('category', 'Uncategorized')))
     receipt_id = c.lastrowid
     for item in line_items_data:
@@ -170,9 +171,9 @@ def get_monthly_budget(month_year):
 def set_monthly_budget(month_year, amount):
     conn = sqlite3.connect(DB_NAME)
     c = conn.cursor()
-    c.execute("""INSERT INTO monthly_budgets (month_year, budget_amount) 
-                 VALUES (?, ?) 
-                 ON CONFLICT(month_year) 
+    c.execute("""INSERT INTO monthly_budgets (month_year, budget_amount)
+                 VALUES (?, ?)
+                 ON CONFLICT(month_year)
                  DO UPDATE SET budget_amount = ?""", (month_year, amount, amount))
     conn.commit()
     conn.close()
@@ -183,7 +184,7 @@ def search_receipts_by_keyword(keyword):
         SELECT DISTINCT r.*
         FROM receipts r
         LEFT JOIN line_items li ON r.id = li.receipt_id
-        WHERE LOWER(r.merchant) LIKE ? 
+        WHERE LOWER(r.merchant) LIKE ?
            OR LOWER(r.invoice_number) LIKE ?
            OR LOWER(COALESCE(r.category, '')) LIKE ?
            OR LOWER(li.name) LIKE ?
@@ -220,19 +221,23 @@ def preprocess_image(image):
 def extract_text(image):
     return pytesseract.image_to_string(image)
 
+def convert_pdf_to_images(pdf_file):
+    # Convert PDF to a list of PIL images
+    return convert_from_bytes(pdf_file.getvalue(), poppler_path='/usr/bin') # Specify poppler path for colab
+
 def parse_with_groq(raw_text, api_key):
     client = Groq(api_key=api_key)
     prompt = f"""
-    Extract structured data from this receipt text. 
-    Return ONLY a JSON object with these keys: 
-    'merchant', 'date' (YYYY-MM-DD), 'invoice_number', 'subtotal', 'tax', 'total', 
+    Extract structured data from this receipt text.
+    Return ONLY a JSON object with these keys:
+    'merchant', 'date' (YYYY-MM-DD), 'invoice_number', 'subtotal', 'tax', 'total',
     'category' (e.g., Groceries, Dining, Shopping, Transportation, Utilities, Healthcare, Entertainment, Other),
     and 'line_items' (a list of objects with 'name', 'qty', 'price').
-    
+
     If 'subtotal' is missing but 'total' and 'tax' exist, calculate it.
     If 'tax' is missing, try to infer it or set to 0.
     Try to categorize based on merchant name and items.
-    
+
     Text:
     {raw_text}
     """
@@ -249,23 +254,23 @@ def parse_with_groq(raw_text, api_key):
 
 def get_ai_budget_suggestions(total_spend, budget, category_breakdown, api_key):
     client = Groq(api_key=api_key)
-    
+
     categories_text = "\n".join([f"- {cat}: ${amt:.2f}" for cat, amt in category_breakdown.items()])
-    
+
     prompt = f"""
     You are a financial advisor. A user has exceeded their monthly budget.
-    
+
     Monthly Budget: ${budget:.2f}
     Actual Spending: ${total_spend:.2f}
     Overspend: ${total_spend - budget:.2f}
-    
+
     Category Breakdown:
     {categories_text}
-    
+
     Provide 3-5 specific, actionable recommendations to reduce spending and stay within budget.
     Be practical and considerate. Format as a numbered list.
     """
-    
+
     try:
         chat_completion = client.chat.completions.create(
             messages=[{"role": "user", "content": prompt}],
@@ -278,13 +283,13 @@ def get_ai_budget_suggestions(total_spend, budget, category_breakdown, api_key):
 # --- VALIDATION LOGIC ---
 def validate_receipt(data, is_dup_bool, dup_id=None):
     results = {}
-    
+
     sub = float(data.get('subtotal', 0))
     tax = float(data.get('tax', 0))
     total = float(data.get('total', 0))
-    
+
     calculated_total = sub + tax
-    
+
     if abs(calculated_total - total) <= 0.03:
         status_msg = f"Valid: {sub:.2f} + {tax:.2f} = {total:.2f}"
         results['sum_check'] = (True, status_msg, f"{sub:.2f}+{tax:.2f}={total:.2f}")
@@ -311,7 +316,7 @@ def validate_receipt(data, is_dup_bool, dup_id=None):
     if data['merchant'] == "Unknown": missing.append("Merchant")
     if not data['date']: missing.append("Date")
     if total == 0.0: missing.append("Total")
-    
+
     if not missing:
         results['fields'] = (True, "All required fields present")
     else:
@@ -321,7 +326,7 @@ def validate_receipt(data, is_dup_bool, dup_id=None):
 
 # --- MAIN APP ---
 def main():
-    st.set_page_config(page_title="Receipt Vault & Validator", layout="wide", page_icon="🧾")
+    st.set_page_config(page_title="Receipt & Invoice Digitizer", layout="wide", page_icon="🧾")
     init_db()
 
     if 'current_receipt' not in st.session_state: st.session_state['current_receipt'] = None
@@ -337,11 +342,11 @@ def main():
     with st.sidebar:
         st.header("🔑 API Configuration")
         user_groq_key = st.text_input("Enter Groq API Key", type="password", help="Get your key at console.groq.com")
-        
+
         if user_groq_key:
             try:
                 client = Groq(api_key=user_groq_key)
-                client.models.list() 
+                client.models.list()
                 st.session_state['is_key_valid'] = True
                 st.success("✅ Valid API Key", icon="🔐")
             except Exception as e:
@@ -357,24 +362,36 @@ def main():
             st.toast("Database cleared!", icon="🗑️")
             st.rerun()
 
-    st.title("🧾 Receipt Vault System")
-    
+    st.title("🧾 Receipts & Invoice Digitizer")
+
     tab_vault, tab_validation, tab_history, tab_analytics = st.tabs(["📤 Upload & Process", "✅ Extraction & Validation", "📜 Bill History", "📊 Analytics"])
 
     # === TAB 1: UPLOAD & PROCESS ===
     with tab_vault:
         st.markdown("### 1. Document Ingestion")
-        uploaded_file = st.file_uploader("Upload Receipt", type=["png", "jpg", "jpeg"])
-        
+        uploaded_file = st.file_uploader("Upload Receipt", type=["png", "jpg", "jpeg", "pdf"])
+
         if uploaded_file:
             st.session_state['last_uploaded_filename'] = uploaded_file.name
-            image = Image.open(uploaded_file)
+            
+            # Handle PDF files
+            if uploaded_file.type == "application/pdf":
+                images = convert_pdf_to_images(uploaded_file)
+                if images:
+                    image = images[0]
+                    st.info("PDF uploaded. Processing page.")
+                else:
+                    st.error("Could not convert PDF to image.")
+                    return # Stop processing if PDF conversion fails
+            else:
+                image = Image.open(uploaded_file)
+
             cleaned_image = preprocess_image(image)
 
             st.subheader("Image Processing")
             col_img1, col_img2 = st.columns(2)
             with col_img1:
-                st.image(image, caption="Original Receipt", use_container_width=True)
+                st.image(image, caption="Original Document", use_container_width=True)
             with col_img2:
                 st.image(cleaned_image, caption="Cleaned (Grayscale) for OCR", use_container_width=True)
 
@@ -387,32 +404,32 @@ def main():
                     with st.spinner("Running OCR & Groq AI Analysis..."):
                         raw_text = extract_text(cleaned_image)
                         structured_data = parse_with_groq(raw_text, user_groq_key)
-                        
+
                         if structured_data:
                             receipt_data = {
                                 "merchant": structured_data.get('merchant', 'Unknown'),
                                 "date": structured_data.get('date', datetime.now().strftime("%Y-%m-%d")),
                                 "invoice_number": structured_data.get('invoice_number', 'Unknown'),
-                                "subtotal": float(structured_data.get('subtotal', 0)),
-                                "tax": float(structured_data.get('tax', 0)),
-                                "total": float(structured_data.get('total', 0)),
+                                "subtotal": float(structured_data.get('subtotal') or 0),
+                                "tax": float(structured_data.get('tax') or 0),
+                                "total": float(structured_data.get('total') or 0),
                                 "category": structured_data.get('category', 'Uncategorized')
                             }
                             line_items = structured_data.get('line_items', [])
-                            
+
                             st.session_state['current_receipt'] = receipt_data
                             st.session_state['current_line_items'] = line_items
-                            
+
                             is_dup, _, conflict_id = check_if_receipt_exists(
-                                receipt_data['merchant'], receipt_data['date'], 
+                                receipt_data['merchant'], receipt_data['date'],
                                 receipt_data['total'], receipt_data['invoice_number']
                             )
-                            
+
                             val_results = validate_receipt(receipt_data, is_dup, conflict_id)
                             st.session_state['validation_status'] = val_results
-                            
+
                             if is_dup:
-                                st.session_state['pending_duplicate_save'] = True 
+                                st.session_state['pending_duplicate_save'] = True
                                 st.session_state['duplicate_conflict_id'] = conflict_id
                                 st.warning(f"⚠️ Duplicate Detected! Matches Vault ID: {conflict_id}")
                             else:
@@ -420,14 +437,14 @@ def main():
                                 st.session_state['duplicate_conflict_id'] = None
                                 new_id = save_receipt_to_db(receipt_data, uploaded_file.name, line_items)
                                 st.success(f"Processing Complete! Added to Vault with ID: {new_id}")
-                            
+
                             st.markdown("#### Quick Validation Check")
                             v1, v2, v3 = st.columns(3)
-                            
+
                             sum_ok = val_results['sum_check'][0]
                             sum_help = val_results['sum_check'][2]
                             v1.metric("Sum Logic", "Pass" if sum_ok else "Fail", help=sum_help, delta_color="normal")
-                            
+
                             if val_results['dup'][0]:
                                 v2.metric("Duplicate", "None")
                             else:
@@ -456,12 +473,12 @@ def main():
     # === TAB 2: DETAILED VALIDATION ===
     with tab_validation:
         st.markdown("## Field Extraction & Validation Details")
-        
+
         if st.session_state['current_receipt']:
             data = st.session_state['current_receipt']
             items = st.session_state['current_line_items']
             val = st.session_state['validation_status']
-            
+
             c_extract, c_validate, c_db = st.columns(3)
             with c_extract:
                 st.info("🔹 Field Extraction")
@@ -485,10 +502,10 @@ def main():
                         st.success(f"**Sum Check**: ✅ {res_sum[1]}")
                     else:
                         st.error(f"**Sum Check**: ❌ {res_sum[1]}")
-                    
+
                     res_dup = val['dup']
                     st.write(f"**Duplicate**: {'✅' if res_dup[0] else '❌'} {res_dup[1]}")
-                    
+
                     res_tax = val['tax_rate']
                     st.write(f"**Tax Rate**: {'✅' if res_tax[0] else '❌'} {res_tax[1]}")
             with c_db:
@@ -503,30 +520,30 @@ def main():
     # === TAB 3: ENHANCED BILL HISTORY ===
     with tab_history:
         st.header("📜 Comprehensive Invoice Management & Analysis")
-        
+
         # 1️ Fetch all invoices
         #========================
         df_all_invoices = get_all_receipts()
-        
+
         if df_all_invoices.empty:
             st.warning("⚠️ No invoices available in the vault yet. Upload some receipts to get started!")
         else:
             st.info(f"📊 Total Invoices in Vault: **{len(df_all_invoices)}**")
-            
+
             # === 2️ DATA EXPORT SECTION ===
             #===============================
             with st.expander("📂 Export Data (CSV / Excel)", expanded=False):
                 st.write("Download your vault data for accounting or external analysis.")
-                
+
                 df_items_export = get_all_line_items_global()
-                
+
                 col_exp1, col_exp2 = st.columns(2)
-                
+
                 # CSV/Excel for Receipts Summary
                 with col_exp1:
                     st.subheader("📑 Receipts Summary")
                     st.caption("One row per receipt (Totals, Dates, Merchants).")
-                    
+
                     csv_receipts = df_all_invoices.to_csv(index=False).encode('utf-8')
                     st.download_button(
                         label="📥 Download CSV",
@@ -535,12 +552,12 @@ def main():
                         mime="text/csv",
                         key='csv_rec'
                     )
-                    
+
                     buffer = io.BytesIO()
                     with pd.ExcelWriter(buffer, engine='xlsxwriter') as writer:
                         df_all_invoices.to_excel(writer, sheet_name='Receipts', index=False)
                     buffer.seek(0)
-                    
+
                     st.download_button(
                         label="📥 Download Excel",
                         data=buffer.getvalue(),
@@ -553,7 +570,7 @@ def main():
                 with col_exp2:
                     st.subheader("🛒 Itemized Details")
                     st.caption("One row per line item (Product Name, Qty, Price + Receipt Info).")
-                    
+
                     if not df_items_export.empty:
                         csv_items = df_items_export.to_csv(index=False).encode('utf-8')
                         st.download_button(
@@ -563,12 +580,12 @@ def main():
                             mime="text/csv",
                             key='csv_item'
                         )
-                        
+
                         buffer_items = io.BytesIO()
                         with pd.ExcelWriter(buffer_items, engine='xlsxwriter') as writer:
                             df_items_export.to_excel(writer, sheet_name='Line Items', index=False)
                         buffer_items.seek(0)
-                        
+
                         st.download_button(
                             label="📥 Download Excel",
                             data=buffer_items.getvalue(),
@@ -585,14 +602,14 @@ def main():
             #========================
             st.subheader("🔍 Search & Filter")
             col_search1, col_search2 = st.columns([2, 1])
-            
+
             with col_search1:
                 search_keyword = st.text_input(
-                    "Search by Vendor, Invoice ID, Category, or Item Name", 
+                    "Search by Vendor, Invoice ID, Category, or Item Name",
                     placeholder="e.g., Walmart, INV-123, Groceries",
                     key="global_search"
                 )
-            
+
             with col_search2:
                 search_by_id = st.number_input("Or Search by Receipt ID", min_value=0, step=1, value=0, key="id_search")
 
@@ -614,34 +631,34 @@ def main():
                 available_months.insert(0, "All Months")
             else:
                 available_months = ["All Months"]
-            
+
             selected_month = st.selectbox("📅 Filter by Month", available_months, key="month_filter")
 
             st.divider()
 
             # Apply Filters
             df_filtered = df_all_invoices.copy()
-            
+
             # Ensure category column exists
             if 'category' not in df_filtered.columns:
                 df_filtered['category'] = 'Uncategorized'
-            
+
             # Search filter
             if search_keyword:
                 df_filtered = search_receipts_by_keyword(search_keyword)
                 # Re-ensure category column exists after search
                 if 'category' not in df_filtered.columns:
                     df_filtered['category'] = 'Uncategorized'
-            
+
             # ID filter
             if search_by_id > 0:
                 df_filtered = df_filtered[df_filtered['id'] == search_by_id]
-            
+
             # Date filter
             if enable_date_filter and filter_date:
                 filter_date_str = filter_date.strftime("%Y-%m-%d")
                 df_filtered = df_filtered[df_filtered['date'] == filter_date_str]
-            
+
             # Month filter (only apply if not "All Months")
             if selected_month and selected_month != "All Months":
                 df_filtered['month_year'] = pd.to_datetime(df_filtered['upload_timestamp']).dt.strftime('%Y-%m')
@@ -653,32 +670,32 @@ def main():
             #=====================================
             if selected_month != "All Months":
                 st.subheader(f"💰 Budget Management - {selected_month}")
-                
+
                 monthly_total = df_filtered['total_amount'].sum()
                 monthly_budget = get_monthly_budget(selected_month)
-                
+
                 col_budget1, col_budget2, col_budget3 = st.columns(3)
-                
+
                 with col_budget1:
                     st.metric("Total Spending", f"${monthly_total:.2f}")
-                
+
                 with col_budget2:
                     st.metric("Monthly Budget", f"${monthly_budget:.2f}" if monthly_budget > 0 else "Not Set")
-                
+
                 with col_budget3:
                     if monthly_budget > 0:
                         budget_usage = (monthly_total / monthly_budget) * 100
                         st.metric("Budget Usage", f"{budget_usage:.1f}%")
-                
+
                 # Budget Progress Bar
                 if monthly_budget > 0:
                     st.progress(min(monthly_total / monthly_budget, 1.0))
-                
+
                 # Set/Update Budget
                 with st.expander("⚙️ Set/Update Monthly Budget"):
                     new_budget = st.number_input(
-                        f"Budget for {selected_month}", 
-                        min_value=0.0, 
+                        f"Budget for {selected_month}",
+                        min_value=0.0,
                         value=float(monthly_budget),
                         step=100.0,
                         key="budget_input"
@@ -693,14 +710,14 @@ def main():
                 # === 7️ CATEGORY-WISE SPENDING ===
                 #=================================
                 st.subheader("📊 Category-Wise Spending Analysis")
-                
+
                 if 'category' in df_filtered.columns and not df_filtered.empty:
                     category_spending = df_filtered.groupby('category')['total_amount'].sum().reset_index()
                     category_spending.columns = ['Category', 'Total Spend']
                     category_spending = category_spending.sort_values('Total Spend', ascending=False)
-                    
+
                     st.dataframe(category_spending, use_container_width=True, hide_index=True)
-                    
+
                     # === 8️ BUDGET STATUS ===
                     #========================
                     if monthly_budget > 0:
@@ -709,7 +726,7 @@ def main():
                         else:
                             overspend = monthly_total - monthly_budget
                             st.warning(f"⚠️ Budget exceeded by ${overspend:.2f}")
-                            
+
                             # === 9 AI SPENDING SUGGESTIONS ===
                             #=================================
                             if st.session_state['is_key_valid']:
@@ -718,8 +735,8 @@ def main():
                                         with st.spinner("Analyzing your spending patterns..."):
                                             category_dict = category_spending.set_index('Category')['Total Spend'].to_dict()
                                             suggestions = get_ai_budget_suggestions(
-                                                monthly_total, 
-                                                monthly_budget, 
+                                                monthly_total,
+                                                monthly_budget,
                                                 category_dict,
                                                 user_groq_key
                                             )
@@ -863,7 +880,7 @@ def main():
     with tab_analytics:
         st.header("📊 Spending Analytics")
         df = get_all_receipts()
-        
+
         if not df.empty:
             df['total_amount'] = pd.to_numeric(df['total_amount'], errors='coerce').fillna(0)
             df['tax'] = pd.to_numeric(df['tax'], errors='coerce').fillna(0)
@@ -880,42 +897,46 @@ def main():
             kpi2.metric("Avg Receipt", f"${avg_ticket:,.2f}")
             kpi3.metric("Total Tax Paid", f"${total_tax:,.2f}")
             kpi4.metric("Last Purchase", recent_date)
-            
+
             st.divider()
 
             st.subheader("🏢 Merchant Breakdown")
             col_a, col_b = st.columns(2)
-            
+
             with col_a:
-                fig_bar = px.bar(df, x='merchant', y='total_amount', color='merchant', 
-                             title="Total Spend per Vendor", 
+                fig_bar = px.bar(df, x='merchant', y='total_amount', color='merchant',
+                             title="Total Spend per Vendor",
                              text_auto='.2s')
                 st.plotly_chart(fig_bar, use_container_width=True)
-            
+                st.markdown("**Insight**: This chart shows how much money has been spent at each vendor. Identifying the top vendors can help in negotiating better deals or optimizing spending habits if certain merchants consume a significant portion of the budget.")
+
             with col_b:
-                fig_pie = px.pie(df, values='total_amount', names='merchant', 
-                             title="Share of Wallet (Spend %)", 
+                fig_pie = px.pie(df, values='total_amount', names='merchant',
+                             title="Share of Wallet (Spend %)",
                              hole=0.4)
                 st.plotly_chart(fig_pie, use_container_width=True)
+                st.markdown("**Insight**: This pie chart illustrates the proportional contribution of each merchant to the total spending. A large slice indicates a dominant vendor, which might be an area to explore for cost-saving opportunities or loyalty program benefits.")
 
             st.subheader("📅 Time Trends")
             if not df_clean.empty:
                 col_c, col_d = st.columns(2)
-                
+
                 with col_c:
                     df_clean['month_year'] = df_clean['date_obj'].dt.strftime('%Y-%m')
                     monthly_spend = df_clean.groupby('month_year')['total_amount'].sum().reset_index()
-                    fig_line = px.line(monthly_spend, x='month_year', y='total_amount', markers=True, 
+                    fig_line = px.line(monthly_spend, x='month_year', y='total_amount', markers=True,
                                    title="Monthly Spending Trend",
                                    labels={'month_year': 'Month', 'total_amount': 'Amount ($)'})
                     st.plotly_chart(fig_line, use_container_width=True)
-                
+                    st.markdown("**Insight**: This line graph visualizes spending patterns over months. Upward trends could indicate increasing expenses, while downward trends might suggest cost-saving measures or seasonal variations in spending.")
+
                 with col_d:
                     df_clean['cumulative'] = df_clean['total_amount'].cumsum()
-                    fig_area = px.area(df_clean, x='date_obj', y='cumulative', 
+                    fig_area = px.area(df_clean, x='date_obj', y='cumulative',
                                    title="Cumulative Spending Over Time",
                                    labels={'date_obj': 'Date', 'cumulative': 'Running Total ($)'})
                     st.plotly_chart(fig_area, use_container_width=True)
+                    st.markdown("**Insight**: This area chart displays the total accumulated spending over time. A steep curve indicates rapid spending, whereas a flatter curve suggests more controlled expenditure. This helps in understanding overall financial progression.")
 
             st.subheader("🧠 Spending Behavior")
             col_e, col_f = st.columns(2)
@@ -926,31 +947,32 @@ def main():
                     days_order = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday']
                     df_clean['day_name'] = pd.Categorical(df_clean['day_name'], categories=days_order, ordered=True)
                     day_counts = df_clean.groupby('day_name')['total_amount'].sum().reset_index()
-                    
-                    fig_day = px.bar(day_counts, x='day_name', y='total_amount', 
+
+                    fig_day = px.bar(day_counts, x='day_name', y='total_amount',
                                  title="Spending by Day of Week",
                                  color='total_amount', color_continuous_scale='Viridis')
                     st.plotly_chart(fig_day, use_container_width=True)
+                    st.markdown("**Insight**: This bar chart reveals spending habits by day of the week. Peaks on certain days might correspond to routine activities like weekend shopping or regular weekly expenses, offering insights into lifestyle spending.")
 
             with col_f:
-                fig_hist = px.histogram(df, x='total_amount', nbins=20, 
+                fig_hist = px.histogram(df, x='total_amount', nbins=20,
                                     title="Distribution of Receipt Amounts",
                                     labels={'total_amount': 'Receipt Value ($)'})
                 st.plotly_chart(fig_hist, use_container_width=True)
+                st.markdown("**Insight**: This histogram shows the frequency distribution of receipt amounts. It helps identify common spending thresholds; for instance, many small transactions versus a few large purchases, which can inform budgeting strategies.")
 
             st.subheader("🛒 Item Analysis")
             df_items = get_all_line_items_global()
             if not df_items.empty:
                 top_items = df_items['name'].value_counts().head(10).reset_index()
                 top_items.columns = ['Item Name', 'Count']
-                
+
                 fig_items = px.bar(top_items, x='Count', y='Item Name', orientation='h',
                                title="Top 10 Most Frequent Items",
                                color='Count')
                 fig_items.update_layout(yaxis={'categoryorder':'total ascending'})
                 st.plotly_chart(fig_items, use_container_width=True)
-            else:
-                st.info("No detailed line item data available yet.")
+                st.markdown("**Insight**: This chart highlights the top 10 most frequently purchased items. This can reveal recurring needs or popular products, useful for inventory management if applicable, or for understanding regular consumption patterns.")
 
         else:
             st.info("No data in vault yet. Upload some receipts to see analytics!")
