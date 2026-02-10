@@ -1,4 +1,4 @@
-
+%%writefile app.py
 import streamlit as st
 import pandas as pd
 import sqlite3
@@ -9,6 +9,7 @@ from datetime import datetime
 import json
 from groq import Groq
 import io
+from pdf2image import convert_from_bytes # Import pdf2image
 
 # --- CONFIGURATION ---
 DB_NAME = 'receipt_vault_v6.db'
@@ -220,6 +221,10 @@ def preprocess_image(image):
 def extract_text(image):
     return pytesseract.image_to_string(image)
 
+def convert_pdf_to_images(pdf_file):
+    # Convert PDF to a list of PIL images
+    return convert_from_bytes(pdf_file.getvalue(), poppler_path='/usr/bin') # Specify poppler path for colab
+
 def parse_with_groq(raw_text, api_key):
     client = Groq(api_key=api_key)
     prompt = f"""
@@ -364,17 +369,29 @@ def main():
     # === TAB 1: UPLOAD & PROCESS ===
     with tab_vault:
         st.markdown("### 1. Document Ingestion")
-        uploaded_file = st.file_uploader("Upload Receipt", type=["png", "jpg", "jpeg"])
+        uploaded_file = st.file_uploader("Upload Receipt", type=["png", "jpg", "jpeg", "pdf"])
 
         if uploaded_file:
             st.session_state['last_uploaded_filename'] = uploaded_file.name
-            image = Image.open(uploaded_file)
+            
+            # Handle PDF files
+            if uploaded_file.type == "application/pdf":
+                images = convert_pdf_to_images(uploaded_file)
+                if images:
+                    image = images[0]
+                    st.info("PDF uploaded. Processing page.")
+                else:
+                    st.error("Could not convert PDF to image.")
+                    return # Stop processing if PDF conversion fails
+            else:
+                image = Image.open(uploaded_file)
+
             cleaned_image = preprocess_image(image)
 
             st.subheader("Image Processing")
             col_img1, col_img2 = st.columns(2)
             with col_img1:
-                st.image(image, caption="Original Receipt", use_container_width=True)
+                st.image(image, caption="Original Document", use_container_width=True)
             with col_img2:
                 st.image(cleaned_image, caption="Cleaned (Grayscale) for OCR", use_container_width=True)
 
