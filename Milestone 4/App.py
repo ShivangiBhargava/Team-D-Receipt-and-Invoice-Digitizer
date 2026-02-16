@@ -4,7 +4,7 @@ import sqlite3
 import plotly.express as px
 from PIL import Image, ImageOps
 import pytesseract
-from datetime import datetime
+from datetime import datetime, date # Import date
 import json
 from groq import Groq
 import io
@@ -54,7 +54,7 @@ def init_db():
     """Initialize database with optimized indexes"""
     with get_db_connection() as conn:
         c = conn.cursor()
-        
+
         # Create tables
         c.execute('''CREATE TABLE IF NOT EXISTS receipts (
                         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -82,7 +82,7 @@ def init_db():
                         price REAL,
                         FOREIGN KEY (receipt_id) REFERENCES receipts (id)
                     )''')
-        
+
         c.execute('''CREATE TABLE IF NOT EXISTS monthly_budgets (
                         id INTEGER PRIMARY KEY AUTOINCREMENT,
                         month_year TEXT UNIQUE,
@@ -97,7 +97,7 @@ def init_db():
             "CREATE INDEX IF NOT EXISTS idx_receipts_upload_month ON receipts(substr(upload_timestamp, 1, 7))",
             "CREATE INDEX IF NOT EXISTS idx_line_items_receipt_id ON line_items(receipt_id)"
         ]
-        
+
         for idx in indexes:
             c.execute(idx)
 
@@ -105,41 +105,41 @@ def check_if_receipt_exists(merchant, date, total, invoice_num):
     """Optimized duplicate detection using SQL-level filtering"""
     with get_db_connection() as conn:
         c = conn.cursor()
-        
+
         # Build SQL query with proper filtering
         query = """
-            SELECT id, merchant, total_amount, invoice_number 
-            FROM receipts 
-            WHERE date = ? 
+            SELECT id, merchant, total_amount, invoice_number
+            FROM receipts
+            WHERE date = ?
             AND ABS(total_amount - ?) <= 0.05
         """
         params = [date, total]
-        
+
         # Add invoice number check if available
         if invoice_num and invoice_num != "Unknown":
             query += " AND invoice_number = ?"
             params.append(invoice_num)
-        
+
         c.execute(query, params)
         candidates = c.fetchall()
-        
+
         # Check for matches
         for row in candidates:
             db_id, db_merch, db_total, db_inv = row
-            
+
             # Invoice number exact match
             if invoice_num and invoice_num != "Unknown" and db_inv and db_inv != "Unknown":
                 if invoice_num == db_inv:
                     return True, 1, db_id
-            
+
             # Merchant name fuzzy match
             m1 = merchant.lower().strip()
             m2 = db_merch.lower().strip()
             merchant_match = (m1 in m2 or m2 in m1)
-            
+
             if merchant_match:
                 return True, 1, db_id
-        
+
         return False, 0, None
 
 def save_receipt_to_db(data, filename, line_items_data):
@@ -147,7 +147,7 @@ def save_receipt_to_db(data, filename, line_items_data):
     with get_db_connection() as conn:
         c = conn.cursor()
         upload_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        
+
         # Insert receipt
         c.execute("""INSERT INTO receipts
                      (merchant, date, invoice_number, subtotal, tax, total_amount, filename, upload_timestamp, category)
@@ -156,7 +156,7 @@ def save_receipt_to_db(data, filename, line_items_data):
                    data['subtotal'], data['tax'], data['total'], filename, upload_time,
                    data.get('category', 'Uncategorized')))
         receipt_id = c.lastrowid
-        
+
         # Batch insert line items using executemany
         if line_items_data:
             line_items_values = [
@@ -167,7 +167,7 @@ def save_receipt_to_db(data, filename, line_items_data):
                 "INSERT INTO line_items (receipt_id, name, qty, price) VALUES (?, ?, ?, ?)",
                 line_items_values
             )
-        
+
         return receipt_id
 
 @st.cache_data(ttl=300)  # 5 minute cache
@@ -199,8 +199,8 @@ def get_line_items(receipt_id):
     with get_db_connection() as conn:
         try:
             df = pd.read_sql_query(
-                "SELECT name, qty, price FROM line_items WHERE receipt_id = ?", 
-                conn, 
+                "SELECT name, qty, price FROM line_items WHERE receipt_id = ?",
+                conn,
                 params=(receipt_id,)
             )
         except:
@@ -228,7 +228,7 @@ def delete_receipt(receipt_id):
         c = conn.cursor()
         c.execute("DELETE FROM line_items WHERE receipt_id = ?", (receipt_id,))
         c.execute("DELETE FROM receipts WHERE id = ?", (receipt_id,))
-    
+
     # Clear caches
     get_all_receipts.clear()
     get_line_items.clear()
@@ -243,7 +243,7 @@ def clear_database():
         c.execute("DELETE FROM line_items")
         c.execute("DELETE FROM receipts")
         c.execute("DELETE FROM monthly_budgets")
-    
+
     # Clear all caches
     get_all_receipts.clear()
     get_line_items.clear()
@@ -282,42 +282,42 @@ def get_filtered_receipts(keyword=None, date_filter=None, month_filter=None, rec
             WHERE 1=1
         """
         params = []
-        
+
         # Add keyword search
         if keyword:
             base_query += """
-                AND (LOWER(r.merchant) LIKE ? 
-                OR LOWER(r.invoice_number) LIKE ? 
-                OR LOWER(COALESCE(r.category, '')) LIKE ? 
+                AND (LOWER(r.merchant) LIKE ?
+                OR LOWER(r.invoice_number) LIKE ?
+                OR LOWER(COALESCE(r.category, '')) LIKE ?
                 OR LOWER(li.name) LIKE ?)
             """
             keyword_pattern = f"%{keyword.lower()}%"
             params.extend([keyword_pattern] * 4)
-        
+
         # Add receipt ID filter
         if receipt_id and receipt_id > 0:
             base_query += " AND r.id = ?"
             params.append(receipt_id)
-        
+
         # Add date filter
         if date_filter:
             base_query += " AND r.date = ?"
             params.append(date_filter)
-        
+
         # Add month filter
         if month_filter and month_filter != "All Months":
             base_query += " AND substr(r.upload_timestamp, 1, 7) = ?"
             params.append(month_filter)
-        
+
         base_query += " ORDER BY r.date DESC, r.id DESC"
-        
+
         try:
             df = pd.read_sql_query(base_query, conn, params=params)
             if not df.empty and 'category' not in df.columns:
                 df['category'] = 'Uncategorized'
         except:
             df = pd.DataFrame()
-    
+
     return df
 
 def search_receipts_by_keyword(keyword):
@@ -347,7 +347,7 @@ def get_analytics_summary():
     """Pre-aggregated analytics summary for dashboard KPIs"""
     with get_db_connection() as conn:
         query = """
-            SELECT 
+            SELECT
                 COUNT(*) as total_receipts,
                 SUM(total_amount) as total_spend,
                 AVG(total_amount) as avg_ticket,
@@ -363,7 +363,7 @@ def get_monthly_spending_summary():
     """Pre-aggregated monthly spending by category"""
     with get_db_connection() as conn:
         query = """
-            SELECT 
+            SELECT
                 strftime('%Y-%m', date) as month_year,
                 category,
                 SUM(total_amount) as total_spend,
@@ -381,7 +381,7 @@ def get_time_series_data():
     """Pre-aggregated time series data for trend charts"""
     with get_db_connection() as conn:
         query = """
-            SELECT 
+            SELECT
                 strftime('%Y-%m', date) as month_year,
                 SUM(total_amount) as monthly_total,
                 COUNT(*) as receipt_count,
@@ -399,7 +399,7 @@ def get_day_of_week_spending():
     """Pre-aggregated spending by day of week"""
     with get_db_connection() as conn:
         query = """
-            SELECT 
+            SELECT
                 CASE CAST(strftime('%w', date) AS INTEGER)
                     WHEN 0 THEN 'Sunday'
                     WHEN 1 THEN 'Monday'
@@ -423,7 +423,7 @@ def get_top_items(limit=10):
     """Pre-aggregated top purchased items"""
     with get_db_connection() as conn:
         query = """
-            SELECT 
+            SELECT
                 name as item_name,
                 COUNT(*) as purchase_count,
                 SUM(qty * price) as total_value
@@ -440,7 +440,7 @@ def get_merchant_breakdown():
     """Pre-aggregated merchant spending breakdown"""
     with get_db_connection() as conn:
         query = """
-            SELECT 
+            SELECT
                 merchant,
                 SUM(total_amount) as total_spend,
                 COUNT(*) as receipt_count,
@@ -451,6 +451,101 @@ def get_merchant_breakdown():
         """
         df = pd.read_sql_query(query, conn)
     return df
+
+# MILESTONE 4: ADVANCED SEARCH & FILTER FUNCTIONS
+def advanced_search_receipts(filters):
+    """
+    MILESTONE 4: Advanced search with multiple filter criteria
+    Supports: keyword, date range, amount range, category, merchant
+    Uses indexed columns for optimal performance
+    """
+    with get_db_connection() as conn:
+
+        # Build dynamic query based on filters
+        base_query = "SELECT DISTINCT r.* FROM receipts r"
+        conditions = []
+        params = []
+
+        # Keyword search (searches across multiple fields)
+        if filters.get('keyword'):
+            keyword_pattern = f"%{filters['keyword'].lower()}%"
+            base_query += " LEFT JOIN line_items li ON r.id = li.receipt_id"
+            conditions.append("""(LOWER(r.merchant) LIKE ?
+                                 OR LOWER(r.invoice_number) LIKE ?
+                                 OR LOWER(COALESCE(r.category, '')) LIKE ?
+                                 OR LOWER(li.name) LIKE ?) """)
+            params.extend([keyword_pattern] * 4)
+
+        # Date range filter
+        if filters.get('date_from'):
+            conditions.append("r.date >= ?")
+            params.append(filters['date_from'])
+
+        if filters.get('date_to'):
+            conditions.append("r.date <= ?")
+            params.append(filters['date_to'])
+
+        # Amount range filter
+        if filters.get('amount_min') is not None:
+            conditions.append("r.total_amount >= ?")
+            params.append(filters['amount_min'])
+
+        if filters.get('amount_max') is not None:
+            conditions.append("r.total_amount <= ?")
+            params.append(filters['amount_max'])
+
+        # Category filter
+        if filters.get('category') and filters['category'] != 'All':
+            conditions.append("r.category = ?")
+            params.append(filters['category'])
+
+        # Merchant filter
+        if filters.get('merchant') and filters['merchant'] != 'All':
+            conditions.append("r.merchant = ?")
+            params.append(filters['merchant'])
+
+        # Combine conditions
+        if conditions:
+            base_query += " WHERE " + " AND ".join(conditions)
+
+        base_query += " ORDER BY r.date DESC, r.id DESC"
+
+        # Execute query
+        try:
+            df = pd.read_sql_query(base_query, conn, params=params)
+            if not df.empty and 'category' not in df.columns:
+                df['category'] = 'Uncategorized'
+        except Exception as e:
+            st.error(f"Search error: {e}")
+            df = pd.DataFrame()
+
+    return df
+
+@st.cache_data(ttl=60)
+def get_unique_categories():
+    """Get list of unique categories for filter dropdown"""
+    with get_db_connection() as conn:
+        try:
+            query = "SELECT DISTINCT category FROM receipts WHERE category IS NOT NULL ORDER BY category"
+            df = pd.read_sql_query(query, conn)
+            categories = df['category'].tolist()
+        except Exception as e:
+            st.error(f"Error fetching categories: {e}")
+            categories = []
+    return ['All'] + categories
+
+@st.cache_data(ttl=60)
+def get_unique_merchants():
+    """Get list of unique merchants for filter dropdown"""
+    with get_db_connection() as conn:
+        try:
+            query = "SELECT DISTINCT merchant FROM receipts WHERE merchant IS NOT NULL ORDER BY merchant"
+            df = pd.read_sql_query(query, conn)
+            merchants = df['merchant'].tolist()
+        except Exception as e:
+            st.error(f"Error fetching merchants: {e}")
+            merchants = []
+    return ['All'] + merchants
 
 # --- PROCESSING FUNCTIONS ---
 def preprocess_image(image):
@@ -502,14 +597,14 @@ def calculate_parsing_score(data):
 def find_matching_template(merchant_name):
     """Finds a template based on merchant name or known aliases"""
     clean_name = merchant_name.lower().strip()
-    
+
     if clean_name in VENDOR_TEMPLATES:
         return VENDOR_TEMPLATES[clean_name]
-    
+
     for vendor_key, template_data in VENDOR_TEMPLATES.items():
         if clean_name == vendor_key or clean_name in template_data['aliases']:
             return template_data
-            
+
     for vendor_key, template_data in VENDOR_TEMPLATES.items():
         if vendor_key in clean_name:
              return template_data
@@ -520,14 +615,14 @@ def apply_template_parsing(standard_data):
     """Takes standard AI-parsed data and refines it using vendor templates"""
     refined_data = standard_data.copy()
     merchant = refined_data.get('merchant', 'Unknown')
-    
+
     template = find_matching_template(merchant)
     template_applied = False
-    
+
     if template:
         template_applied = True
         refined_data['merchant'] = template['standardized_name']
-        
+
         total = refined_data.get('total', 0)
         tax = refined_data.get('tax', 0)
         known_rate = template.get('tax_rate')
@@ -535,7 +630,7 @@ def apply_template_parsing(standard_data):
         if total > 0 and (tax == 0 or tax is None) and known_rate is not None:
             subtotal = total / (1 + known_rate)
             calculated_tax = total - subtotal
-            
+
             refined_data['tax'] = round(calculated_tax, 2)
             refined_data['subtotal'] = round(subtotal, 2)
             refined_data['tax_rate_applied'] = known_rate
@@ -710,10 +805,10 @@ def main():
                 st.error("❌ Invalid API Key", icon="⛔")
         else:
             st.session_state['is_key_valid'] = False
-        
+
         st.divider()
         st.header("⚙️ Settings")
-        
+
         # Clear Cache Button
         if st.button("🔄 Clear Cache", help="Clear all cached data to refresh analytics"):
             get_all_receipts.clear()
@@ -728,7 +823,7 @@ def main():
             get_available_months.clear()
             st.toast("Cache cleared!", icon="🔄")
             st.rerun()
-        
+
         if st.button("🗑️ Clear Database"):
             clear_database()
             st.toast("Database cleared!", icon="🗑️")
@@ -772,7 +867,7 @@ def main():
                 else:
                     with st.spinner("Running OCR, Standard AI Parsing, and Template Matching..."):
                         raw_text = extract_text(cleaned_image)
-                        
+
                         structured_data_standard = parse_with_groq(raw_text, user_groq_key)
 
                         if structured_data_standard:
@@ -786,7 +881,7 @@ def main():
                                 "category": structured_data_standard.get('category', 'Uncategorized')
                             }
                             line_items = structured_data_standard.get('line_items', [])
-                            
+
                             standard_score = calculate_parsing_score(receipt_data_standard)
                             receipt_data_template, template_applied = apply_template_parsing(receipt_data_standard)
                             template_score = calculate_parsing_score(receipt_data_template)
@@ -822,13 +917,13 @@ def main():
                                 st.session_state['pending_duplicate_save'] = False
                                 st.session_state['duplicate_conflict_id'] = None
                                 new_id = save_receipt_to_db(final_receipt_data, uploaded_file.name, line_items)
-                                
+
                                 # Clear relevant caches
                                 get_all_receipts.clear()
                                 get_analytics_summary.clear()
                                 get_time_series_data.clear()
                                 get_merchant_breakdown.clear()
-                                
+
                                 st.success(f"Processing Complete! Added to Vault with ID: {new_id}")
                                 st.toast("Receipt processed successfully!", icon="✅")
 
@@ -845,11 +940,11 @@ def main():
                         l_items = st.session_state['current_line_items']
                         f_name = st.session_state['last_uploaded_filename']
                         save_receipt_to_db(r_data, f_name, l_items)
-                        
+
                         # Clear relevant caches
                         get_all_receipts.clear()
                         get_analytics_summary.clear()
-                        
+
                         st.session_state['pending_duplicate_save'] = False
                         st.success("Forced save successful!")
                         st.rerun()
@@ -867,7 +962,7 @@ def main():
 
         with st.container():
             st.markdown('<div class="comparison-container">', unsafe_allow_html=True)
-            
+
             comparison_data = st.session_state.get('parsing_comparison')
 
             if comparison_data:
@@ -880,7 +975,7 @@ def main():
                 std_tax_display = f"${std.get('tax', 0):.2f}"
                 if std.get('tax') == 0 or std.get('tax') is None:
                     std_tax_display = '<span class="not-detected">Not detected</span>'
-                
+
                 tmpl_tax_val = tmpl.get('tax', 0)
                 tmpl_tax_display = f"${tmpl_tax_val:.2f}"
                 if tmpl.get('tax_rate_applied'):
@@ -930,7 +1025,7 @@ def main():
 
             else:
                 st.info("Upload and process a document to see the template parsing comparison.")
-            
+
             st.markdown('</div>', unsafe_allow_html=True)
 
         st.divider()
@@ -947,13 +1042,13 @@ def main():
                 if val:
                     res_sum = val['sum_check']
                     st.write(f"**Sum Check**: {'✅' if res_sum[0] else '❌'} {res_sum[1]}")
-                    
+
                     res_dup = val['dup']
                     st.write(f"**Duplicate Detected**: {'❌' if not res_dup[0] else '✅'} {res_dup[1]}")
 
                     res_tax = val['tax_rate']
                     st.write(f"**Tax Logic**: {'✅' if res_tax[0] else '⚠️'} {res_tax[1]}")
-                    
+
                     res_fields = val['fields']
                     st.write(f"**Required Fields**: {'✅' if res_fields[0] else '⚠️'} {res_fields[1]}")
 
@@ -982,7 +1077,7 @@ def main():
                 st.write("Download your vault data for accounting or external analysis.")
                 df_items_export = get_all_line_items_global()
                 col_exp1, col_exp2 = st.columns(2)
-                
+
                 with col_exp1:
                     st.subheader("📑 Receipts Summary")
                     st.caption("One row per receipt (Totals, Dates, Merchants).")
@@ -1034,44 +1129,128 @@ def main():
 
             st.divider()
 
-            st.subheader("🔍 Search & Filter")
-            col_search1, col_search2 = st.columns([2, 1])
-            with col_search1:
-                search_keyword = st.text_input(
-                    "Search by Vendor, Invoice ID, Category, or Item Name",
-                    placeholder="e.g., Walmart, INV-123, Groceries",
-                    key="global_search"
-                )
-            with col_search2:
-                search_by_id = st.number_input("Or Search by Receipt ID", min_value=0, step=1, value=0, key="id_search")
+            # ================================================================
+            # MILESTONE 4: ADVANCED SEARCH & FILTER SECTION
+            # ================================================================
+            # Initialize session state for filter application control
+            if 'filters_applied' not in st.session_state:
+                st.session_state['filters_applied'] = False
+            if 'current_filters' not in st.session_state:
+                st.session_state['current_filters'] = {}
 
-            col_date1, col_date2 = st.columns([1, 2])
-            with col_date1:
-                enable_date_filter = st.checkbox("Filter by Date", value=False)
-            with col_date2:
-                if enable_date_filter:
-                    filter_date = st.date_input("Select Date", value=datetime.now())
-                else:
-                    filter_date = None
+            with st.expander("🔍 Advanced Search & Filters", expanded=True):
+                st.markdown("### Multi-Criteria Search")
 
+                col_s1, col_s2 = st.columns(2)
+
+                with col_s1:
+                    # Keyword search
+                    search_keyword = st.text_input(
+                        "🔎 Keyword Search",
+                        placeholder="Search vendor, invoice, category, or item name",
+                        key="adv_keyword",
+                        value=st.session_state.current_filters.get('keyword', '')
+                    )
+
+                    # Date range
+                    st.markdown("**📅 Date Range**")
+                    col_d1, col_d2 = st.columns(2)
+                    date_from_val = None
+                    if 'date_from' in st.session_state.current_filters:
+                        try:
+                            date_from_val = date.fromisoformat(st.session_state.current_filters['date_from'])
+                        except ValueError:
+                            date_from_val = None
+                    with col_d1:
+                        date_from = st.date_input("From", value=date_from_val, key="date_from")
+
+                    date_to_val = None
+                    if 'date_to' in st.session_state.current_filters:
+                        try:
+                            date_to_val = date.fromisoformat(st.session_state.current_filters['date_to'])
+                        except ValueError:
+                            date_to_val = None
+                    with col_d2:
+                        date_to = st.date_input("To", value=date_to_val, key="date_to")
+
+                with col_s2:
+                    # Category filter
+                    categories = get_unique_categories()
+                    current_category_idx = 0
+                    if st.session_state.current_filters.get('category'):
+                        try:
+                            current_category_idx = categories.index(st.session_state.current_filters['category'])
+                        except ValueError:
+                            current_category_idx = 0 # Category not found, default to 'All'
+                    selected_category = st.selectbox("📁 Category", categories, key="filter_category", index=current_category_idx)
+
+                    # Merchant filter
+                    merchants = get_unique_merchants()
+                    current_merchant_idx = 0
+                    if st.session_state.current_filters.get('merchant'):
+                        try:
+                            current_merchant_idx = merchants.index(st.session_state.current_filters['merchant'])
+                        except ValueError:
+                            current_merchant_idx = 0 # Merchant not found, default to 'All'
+                    selected_merchant = st.selectbox("🏪 Merchant", merchants, key="filter_merchant", index=current_merchant_idx)
+
+                # Amount range
+                st.markdown("**💰 Amount Range**")
+                col_a1, col_a2 = st.columns(2)
+                with col_a1:
+                    amount_min = st.number_input("Min Amount ($", min_value=0.0, value=st.session_state.current_filters.get('amount_min', 0.0), step=10.0, key="amount_min")
+                with col_a2:
+                    amount_max = st.number_input("Max Amount ($", min_value=0.0, value=st.session_state.current_filters.get('amount_max', 10000.0), step=10.0, key="amount_max")
+
+                # Apply filters button
+                col_apply, col_reset = st.columns([1, 1])
+                with col_apply:
+                    if st.button("🔍 Apply Filters", type="primary", use_container_width=True):
+                        st.session_state['filters_applied'] = True
+                        # Collect current filter values into session state for persistence and application
+                        temp_filters = {}
+                        if search_keyword: temp_filters['keyword'] = search_keyword
+                        if date_from: temp_filters['date_from'] = date_from.strftime("%Y-%m-%d")
+                        if date_to: temp_filters['date_to'] = date_to.strftime("%Y-%m-%d")
+                        if amount_min > 0: temp_filters['amount_min'] = amount_min
+                        if amount_max < 10000: temp_filters['amount_max'] = amount_max
+                        if selected_category != 'All': temp_filters['category'] = selected_category
+                        if selected_merchant != 'All': temp_filters['merchant'] = selected_merchant
+                        st.session_state['current_filters'] = temp_filters
+                        st.rerun() # Rerun to apply filters based on updated session state
+
+                with col_reset:
+                    if st.button("🔄 Reset", use_container_width=True):
+                        st.session_state['filters_applied'] = False
+                        st.session_state['current_filters'] = {} # Clear stored filters
+                        st.rerun() # Rerun to reset widgets to default and show all invoices
+
+
+            # Get filtered results based on filters_applied state
+            if st.session_state['filters_applied'] and st.session_state['current_filters']:
+                df_filtered = advanced_search_receipts(st.session_state['current_filters'])
+                st.success(f"✅ Found {len(df_filtered)} matching receipts")
+            else:
+                # If no filters applied or reset, show all invoices
+                df_filtered = df_all_invoices
+
+            st.divider()
+
+            # Month filter for budget management
             available_months = get_available_months()
             if available_months:
                 available_months.insert(0, "All Months")
             else:
                 available_months = ["All Months"]
             selected_month = st.selectbox("📅 Filter by Month", available_months, key="month_filter")
+
+            # Apply month filter to the filtered results
+            if selected_month != "All Months":
+                month_str = selected_month
+                df_filtered = df_filtered[df_filtered['upload_timestamp'].str.startswith(month_str)]
+
             st.divider()
 
-            # Use optimized filtering
-            date_str = filter_date.strftime("%Y-%m-%d") if enable_date_filter and filter_date else None
-            month_str = selected_month if selected_month != "All Months" else None
-            
-            df_filtered = get_filtered_receipts(
-                keyword=search_keyword if search_keyword else None,
-                date_filter=date_str,
-                month_filter=month_str,
-                receipt_id=search_by_id if search_by_id > 0 else None
-            )
 
             if selected_month != "All Months":
                 st.subheader(f"💰 Budget Management - {selected_month}")
@@ -1233,18 +1412,18 @@ def main():
     # === TAB 4: ANALYTICS (OPTIMIZED) ===
     with tab_analytics:
         st.header("📊 Spending Analytics")
-        
+
         # Use pre-aggregated summary
         summary = get_analytics_summary()
 
         if summary is not None and summary['total_receipts'] > 0:
             kpi1, kpi2, kpi3, kpi4 = st.columns(4)
-            
+
             total_spend = summary['total_spend']
             avg_ticket = summary['avg_ticket']
             total_tax = summary['total_tax']
             latest_date = summary['latest_date']
-            
+
             try:
                 recent_date = datetime.strptime(latest_date, '%Y-%m-%d').strftime('%b %d, %Y')
             except:
@@ -1280,10 +1459,10 @@ def main():
                     st.markdown("**Insight**: This pie chart illustrates the proportional contribution of each merchant to the total spending. A large slice indicates a dominant vendor, which might be an area to explore for cost-saving opportunities or loyalty program benefits.")
 
             st.subheader("📅 Time Trends")
-            
+
             # Use pre-aggregated time series data
             time_series_df = get_time_series_data()
-            
+
             if not time_series_df.empty:
                 col_c, col_d = st.columns(2)
 
@@ -1330,7 +1509,7 @@ def main():
                     st.markdown("**Insight**: This histogram shows the frequency distribution of receipt amounts. It helps identify common spending thresholds; for instance, many small transactions versus a few large purchases, which can inform budgeting strategies.")
 
             st.subheader("🛒 Item Analysis")
-            
+
             # Use pre-aggregated top items
             top_items_df = get_top_items(10)
             if not top_items_df.empty:
